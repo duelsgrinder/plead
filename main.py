@@ -15,33 +15,38 @@ def home():
     return "Bot is running 24/7!"
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8080)
+    # Render usually provides a port, but 8080 is the default for most setups
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
+    print("[INFO] Starting Flask background thread...")
     t = Thread(target=run_flask)
+    t.daemon = True # This ensures the thread closes when the main program stops
     t.start()
 
 # --- BOT CONFIGURATION ---
-# These are safe to leave here, but TOKEN is now a secret!
 GUILD_ID = "1260440749204570294"
 CHANNEL_ID = "1260440749720473695"
 STATUS = "dnd" # online/dnd/idle
 SELF_MUTE = True
 SELF_DEAF = True
 
-# Pull token from Render Environment Variables
+# Pull token from Render Environment Variables (Secrets)
 TOKEN = os.getenv("TOKEN")
 
 def check_token():
     if not TOKEN:
         print("[ERROR] TOKEN variable not found in Environment Variables!")
+        print("Go to Render -> Environment -> Add 'TOKEN' with your account token.")
         sys.exit()
     
     headers = {"Authorization": TOKEN, "Content-Type": "application/json"}
-    validate = requests.get('https://canary.discordapp.com/api/v9/users/@me', headers=headers)
+    # Standard API check
+    validate = requests.get('https://discord.com/api/v9/users/@me', headers=headers)
     
     if validate.status_code != 200:
-        print("[ERROR] Token is invalid or expired. Update it in Render.")
+        print(f"[ERROR] Token is invalid. Discord returned: {validate.status_code}")
         sys.exit()
     
     return validate.json()
@@ -50,22 +55,29 @@ def joiner(token, status):
     ws = websocket.WebSocket()
     try:
         ws.connect('wss://gateway.discord.gg/?v=9&encoding=json')
-        start = json.loads(ws.recv())
-        heartbeat = start['d']['heartbeat_interval']
         
+        # Receive the Hello packet
+        hello = json.loads(ws.recv())
+        
+        # Identify payload
         auth = {
             "op": 2,
             "d": {
                 "token": token,
                 "properties": {
-                    "$os": "Windows 10",
-                    "$browser": "Google Chrome",
-                    "$device": "Windows"
+                    "$os": "windows",
+                    "$browser": "chrome",
+                    "$device": ""
                 },
                 "presence": {"status": status, "afk": False}
             }
         }
+        ws.send(json.dumps(auth))
         
+        # Critical: Give Discord a second to authenticate before joining VC
+        time.sleep(2)
+        
+        # Voice state update payload
         vc = {
             "op": 4,
             "d": {
@@ -75,35 +87,41 @@ def joiner(token, status):
                 "self_deaf": SELF_DEAF
             }
         }
-        
-        ws.send(json.dumps(auth))
         ws.send(json.dumps(vc))
-        time.sleep(1) # Wait for gateway to register
-        ws.send(json.dumps({"op": 1, "d": None})) # Heartbeat
+        
+        # Send heartbeat to stay connected briefly
+        ws.send(json.dumps({"op": 1, "d": None}))
+        
+        print(f"[SUCCESS] Join request sent to channel {CHANNEL_ID}")
         ws.close()
     except Exception as e:
-        print(f"Gateway Error: {e}")
+        print(f"[GATEWAY ERROR] {e}")
 
 def run_bot():
+    print("[INFO] Validating Token...")
     userinfo = check_token()
     
-    # Fix the 'clear' vs 'cls' error
+    # Clean screen logic
     if os.name == 'nt':
         os.system("cls")
     else:
         os.system("clear")
         
-    print(f"Logged in as {userinfo['username']}#{userinfo.get('discriminator', '0')}")
+    print(f"--- Logged in as {userinfo['username']} ---")
     
     while True:
         try:
             joiner(TOKEN, STATUS)
         except Exception as e:
-            print(f"Loop Error: {e}")
+            print(f"[LOOP ERROR] {e}")
+        
+        # Discord usually keeps you in VC as long as the session is "fresh"
+        # 30-60 seconds is a safe interval
         time.sleep(30)
 
 if __name__ == "__main__":
-    # Start the web server first
+    # 1. Start the web server (Pings this to keep it awake)
     keep_alive()
-    # Start the bot joiner
+    
+    # 2. Start the actual Discord bot process
     run_bot()
